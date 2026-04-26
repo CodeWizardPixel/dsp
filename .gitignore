@@ -1,0 +1,8 @@
+.idea/
+.idea/dsp.iml
+.idea/misc.xml
+.idea/modules.xml
+.idea/vcs.xml
+.idea/inspectionProfiles/profiles_settings.xml
+.idea/inspectionProfiles/Project_Default.xml
+__pycache__/sinc_filter.cpython-311.pyc
