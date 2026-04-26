@@ -7,7 +7,7 @@ import pyaudio
 
 from buffers.dual_thread_ring_buffer import RingBufferDualThread
 from filters.chebyshev.chebyshev_filter_bank import ChebyshevFilterBank
-from filters.sinc.band_pass_filter import StreamingBandPassFilter
+from filters.sinc.bandpass_filter import StreamingBandPassFilter
 from filters.sinc.highpass_sinc_filter import StreamingHighPassFilter
 from filters.sinc.lowpass_sinc_filter import DEFAULT_TAP_COUNT, StreamingLowPassFilter
 from buffers.single_thread_ring_buffer import SingleThreadRingBuffer

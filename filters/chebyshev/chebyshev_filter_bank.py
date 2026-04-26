@@ -1,20 +1,29 @@
-import numpy as np
-from scipy.signal import cheby1, sosfilt
+from collections import deque
 
-from filters.chebyshev.chebyshev_lowpass_filter import DEFAULT_ORDER, DEFAULT_RIPPLE_DB
-from util import db_to_gain
+from scipy.fft import fftshift, irfft, rfftfreq
+
+from filters.chebyshev.chebyshev_bandpass_filter import chebyshev_band_pass_gain
+from filters.chebyshev.chebyshev_highpass_filter import chebyshev_high_pass_gain
+from filters.chebyshev.chebyshev_lowpass_filter import (
+    DEFAULT_ORDER,
+    DEFAULT_RIPPLE_DB,
+    chebyshev_low_pass_gain,
+)
+from util import build_hamming_window, db_to_gain, ripple_db_to_epsilon
 
 
 CHEBYSHEV_BANDS = [
-    ("lowpass", 100),
-    ("bandpass", (100, 300)),
-    ("bandpass", (300, 700)),
-    ("bandpass", (700, 1500)),
-    ("bandpass", (1500, 3100)),
-    ("bandpass", (3100, 6300)),
-    ("bandpass", (6300, 12700)),
-    ("highpass", 12700),
+    ("low_pass", 0, 100),
+    ("band_pass", 100, 300),
+    ("band_pass", 300, 700),
+    ("band_pass", 700, 1500),
+    ("band_pass", 1500, 3100),
+    ("band_pass", 3100, 6300),
+    ("band_pass", 6300, 12700),
+    ("high_pass", 12700, 22050),
 ]
+DEFAULT_TAP_COUNT = 129
+DEFAULT_FFT_SIZE = 2048
 
 
 class ChebyshevFilterBank:
@@ -24,44 +33,88 @@ class ChebyshevFilterBank:
         band_gains_db,
         order=DEFAULT_ORDER,
         ripple_db=DEFAULT_RIPPLE_DB,
+        tap_count=DEFAULT_TAP_COUNT,
+        fft_size=DEFAULT_FFT_SIZE,
     ):
         self.sample_rate = sample_rate
         self.order = order
-        self.ripple_db = ripple_db
+        self.epsilon = ripple_db_to_epsilon(ripple_db)
+        self.tap_count = tap_count
+        self.fft_size = fft_size
         self.band_gains_db = band_gains_db.copy()
         self.band_gains = {}
-        self.filters = []
+        self.history = deque([0] * self.tap_count, maxlen=self.tap_count)
 
         for band_number, gain_db in self.band_gains_db.items():
             self.band_gains[band_number] = db_to_gain(gain_db)
 
-        self.build_filters()
-
-    def build_filters(self):
-        for filter_type, cutoff in CHEBYSHEV_BANDS:
-            sos = cheby1(
-                self.order,
-                self.ripple_db,
-                cutoff,
-                btype=filter_type,
-                fs=self.sample_rate,
-                output="sos",
-            )
-            state = np.zeros((sos.shape[0], 2))
-            self.filters.append([sos, state])
+        self.rebuild_kernel()
 
     def set_band_gain(self, band_number, gain_db):
         self.band_gains_db[band_number] = gain_db
         self.band_gains[band_number] = db_to_gain(gain_db)
+        self.rebuild_kernel()
+
+    def rebuild_kernel(self):
+        frequencies = rfftfreq(self.fft_size, 1 / self.sample_rate)
+        frequency_response = []
+
+        for frequency_hz in frequencies:
+            frequency_response.append(self.combined_gain(frequency_hz))
+
+        impulse_response = fftshift(irfft(frequency_response, self.fft_size)).tolist()
+        center = len(impulse_response) // 2
+        half_taps = self.tap_count // 2
+        kernel = impulse_response[center - half_taps:center + half_taps + 1]
+        window = build_hamming_window(len(kernel))
+
+        self.kernel = [
+            kernel_value * window_value
+            for kernel_value, window_value in zip(kernel, window)
+        ]
+
+    def combined_gain(self, frequency_hz):
+        gain = 0
+
+        for band_index, band in enumerate(CHEBYSHEV_BANDS, start=1):
+            filter_type, low_cutoff_hz, high_cutoff_hz = band
+            band_gain = self.band_gains[band_index]
+
+            if filter_type == "low_pass":
+                filter_gain = chebyshev_low_pass_gain(
+                    frequency_hz,
+                    high_cutoff_hz,
+                    self.order,
+                    self.epsilon,
+                )
+            elif filter_type == "high_pass":
+                filter_gain = chebyshev_high_pass_gain(
+                    frequency_hz,
+                    low_cutoff_hz,
+                    self.order,
+                    self.epsilon,
+                )
+            else:
+                filter_gain = chebyshev_band_pass_gain(
+                    frequency_hz,
+                    low_cutoff_hz,
+                    high_cutoff_hz,
+                    self.order,
+                    self.epsilon,
+                )
+
+            gain += filter_gain * band_gain
+
+        return gain
+
+    def process_sample(self, sample):
+        self.history.appendleft(sample)
+
+        output = 0
+        for sample_value, kernel_value in zip(self.history, self.kernel):
+            output += sample_value * kernel_value
+
+        return output
 
     def process_samples(self, samples):
-        input_samples = np.asarray(samples, dtype=float)
-        output_samples = np.zeros_like(input_samples)
-
-        for band_index, filter_state in enumerate(self.filters, start=1):
-            sos, state = filter_state
-            filtered_samples, new_state = sosfilt(sos, input_samples, zi=state)
-            filter_state[1] = new_state
-            output_samples += filtered_samples * self.band_gains[band_index]
-
-        return output_samples.tolist()
+        return [self.process_sample(sample) for sample in samples]
