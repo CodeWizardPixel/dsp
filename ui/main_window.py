@@ -21,13 +21,15 @@ from PyQt5.QtCore import Qt
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from play_wav import (  # noqa: E402
+from play_wav import (
     BUFFER_MODE_DUAL_THREAD,
     BUFFER_MODE_SINGLE_THREAD,
     DEFAULT_BLOCK_SIZE,
     DEFAULT_PREFILL_BLOCKS,
     DEFAULT_RING_BUFFER_BLOCKS,
     EqualizerPlayer,
+    FILTER_TYPE_CHEBYSHEV,
+    FILTER_TYPE_SINC,
 )
 
 
@@ -45,11 +47,13 @@ BANDS = [
 
 class PlayerWorker(QObject):
     finished = pyqtSignal()
+    failed = pyqtSignal(str)
 
     def __init__(
         self,
         file_path,
         buffer_mode,
+        filter_type,
         block_size,
         ring_buffer_blocks,
         prefill_blocks,
@@ -59,6 +63,7 @@ class PlayerWorker(QObject):
         self.player = EqualizerPlayer(
             file_path=file_path,
             buffer_mode=buffer_mode,
+            filter_type=filter_type,
             block_size=block_size,
             ring_buffer_blocks=ring_buffer_blocks,
             prefill_blocks=prefill_blocks,
@@ -66,8 +71,12 @@ class PlayerWorker(QObject):
         )
 
     def run(self):
-        self.player.play()
-        self.finished.emit()
+        try:
+            self.player.play()
+        except Exception as error:
+            self.failed.emit(str(error))
+        finally:
+            self.finished.emit()
 
     def stop(self):
         self.player.stop()
@@ -121,6 +130,10 @@ class MainWindow(QMainWindow):
         self.buffer_mode.addItem("Двухпоточный", BUFFER_MODE_DUAL_THREAD)
         self.buffer_mode.addItem("Однопоточный", BUFFER_MODE_SINGLE_THREAD)
 
+        self.filter_type = QComboBox()
+        self.filter_type.addItem("Окно Хемминга FIR", FILTER_TYPE_SINC)
+        self.filter_type.addItem("Чебышев I рода IIR", FILTER_TYPE_CHEBYSHEV)
+
         self.block_size = QSpinBox()
         self.block_size.setRange(64, 8192)
         self.block_size.setSingleStep(64)
@@ -136,12 +149,14 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(QLabel("Тип буфера"), 0, 0)
         layout.addWidget(self.buffer_mode, 0, 1)
-        layout.addWidget(QLabel("Размер блока"), 0, 2)
-        layout.addWidget(self.block_size, 0, 3)
-        layout.addWidget(QLabel("Блоков в кольце"), 1, 0)
-        layout.addWidget(self.ring_buffer_blocks, 1, 1)
-        layout.addWidget(QLabel("Предзаполнение"), 1, 2)
-        layout.addWidget(self.prefill_blocks, 1, 3)
+        layout.addWidget(QLabel("Тип фильтра"), 0, 2)
+        layout.addWidget(self.filter_type, 0, 3)
+        layout.addWidget(QLabel("Размер блока"), 1, 0)
+        layout.addWidget(self.block_size, 1, 1)
+        layout.addWidget(QLabel("Блоков в кольце"), 1, 2)
+        layout.addWidget(self.ring_buffer_blocks, 1, 3)
+        layout.addWidget(QLabel("Предзаполнение"), 2, 0)
+        layout.addWidget(self.prefill_blocks, 2, 1)
 
         return group
 
@@ -228,6 +243,7 @@ class MainWindow(QMainWindow):
         self.worker = PlayerWorker(
             file_path=self.file_path,
             buffer_mode=self.buffer_mode.currentData(),
+            filter_type=self.filter_type.currentData(),
             block_size=self.block_size.value(),
             ring_buffer_blocks=self.ring_buffer_blocks.value(),
             prefill_blocks=self.prefill_blocks.value(),
@@ -237,9 +253,9 @@ class MainWindow(QMainWindow):
 
         self.thread.started.connect(self.worker.run)
         self.worker.finished.connect(self.thread.quit)
-        self.worker.finished.connect(self.playback_finished)
+        self.worker.failed.connect(self.playback_failed)
         self.thread.finished.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.finished.connect(self.playback_finished)
 
         self.play_button.setEnabled(False)
         self.stop_button.setEnabled(True)
@@ -258,7 +274,12 @@ class MainWindow(QMainWindow):
 
     def playback_finished(self):
         self.worker = None
+        finished_thread = self.thread
         self.thread = None
+
+        if finished_thread is not None:
+            finished_thread.deleteLater()
+
         self.play_button.setEnabled(True)
         self.stop_button.setEnabled(False)
 
@@ -266,6 +287,9 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Сброшено")
         else:
             self.status_label.setText("Готово")
+
+    def playback_failed(self, message):
+        self.status_label.setText(f"Ошибка: {message}")
 
 
 def main():

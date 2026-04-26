@@ -5,11 +5,12 @@ from threading import Thread
 
 import pyaudio
 
-from band_pass_filter import StreamingBandPassFilter
-from highpass_sinc_filter import StreamingHighPassFilter
-from lowpass_sinc_filter import DEFAULT_TAP_COUNT, StreamingLowPassFilter
-from dual_thread_ring_buffer import RingBufferDualThread
-from single_thread_ring_buffer import SingleThreadRingBuffer
+from buffers.dual_thread_ring_buffer import RingBufferDualThread
+from filters.chebyshev.chebyshev_filter_bank import ChebyshevFilterBank
+from filters.sinc.band_pass_filter import StreamingBandPassFilter
+from filters.sinc.highpass_sinc_filter import StreamingHighPassFilter
+from filters.sinc.lowpass_sinc_filter import DEFAULT_TAP_COUNT, StreamingLowPassFilter
+from buffers.single_thread_ring_buffer import SingleThreadRingBuffer
 
 
 DEFAULT_BLOCK_SIZE = 128
@@ -17,6 +18,8 @@ DEFAULT_RING_BUFFER_BLOCKS = 8
 DEFAULT_PREFILL_BLOCKS = 2
 BUFFER_MODE_DUAL_THREAD = "dual_thread"
 BUFFER_MODE_SINGLE_THREAD = "single_thread"
+FILTER_TYPE_SINC = "sinc"
+FILTER_TYPE_CHEBYSHEV = "chebyshev"
 OUTPUT_CHANNELS = 1
 BYTES_PER_SAMPLE = 2
 DEFAULT_BAND_GAINS_DB = {
@@ -65,7 +68,7 @@ def samples_to_bytes(samples):
     return pcm.tobytes()
 
 
-def build_filter_bank(sample_rate, taps, band_gains_db=None):
+def build_sinc_filter_bank(sample_rate, taps, band_gains_db=None):
     gains = DEFAULT_BAND_GAINS_DB.copy()
     if band_gains_db is not None:
         gains.update(band_gains_db)
@@ -82,6 +85,21 @@ def build_filter_bank(sample_rate, taps, band_gains_db=None):
     ]
 
 
+def build_chebyshev_filter_bank(sample_rate, band_gains_db=None):
+    gains = DEFAULT_BAND_GAINS_DB.copy()
+    if band_gains_db is not None:
+        gains.update(band_gains_db)
+
+    return ChebyshevFilterBank(sample_rate, gains)
+
+
+def build_filter_bank(sample_rate, taps, band_gains_db=None, filter_type=FILTER_TYPE_SINC):
+    if filter_type == FILTER_TYPE_CHEBYSHEV:
+        return build_chebyshev_filter_bank(sample_rate, band_gains_db)
+
+    return build_sinc_filter_bank(sample_rate, taps, band_gains_db)
+
+
 def mix_filter_outputs(filter_outputs):
     mixed_samples = []
 
@@ -92,6 +110,9 @@ def mix_filter_outputs(filter_outputs):
 
 
 def process_samples_with_filter_bank(samples, filters):
+    if hasattr(filters, "process_samples"):
+        return filters.process_samples(samples)
+
     filter_outputs = []
 
     for audio_filter in filters:
@@ -105,6 +126,7 @@ class EqualizerPlayer:
         self,
         file_path,
         buffer_mode=BUFFER_MODE_DUAL_THREAD,
+        filter_type=FILTER_TYPE_SINC,
         taps=DEFAULT_TAP_COUNT,
         block_size=DEFAULT_BLOCK_SIZE,
         ring_buffer_blocks=DEFAULT_RING_BUFFER_BLOCKS,
@@ -113,6 +135,7 @@ class EqualizerPlayer:
     ):
         self.file_path = file_path
         self.buffer_mode = buffer_mode
+        self.filter_type = filter_type
         self.taps = taps
         self.block_size = block_size
         self.ring_buffer_blocks = ring_buffer_blocks
@@ -129,7 +152,10 @@ class EqualizerPlayer:
         self.band_gains_db[band_number] = gain_db
 
         if self.filters:
-            self.filters[band_number - 1].set_gain_db(gain_db)
+            if hasattr(self.filters, "set_band_gain"):
+                self.filters.set_band_gain(band_number, gain_db)
+            else:
+                self.filters[band_number - 1].set_gain_db(gain_db)
 
     def stop(self):
         self.stopped = True
@@ -144,7 +170,12 @@ class EqualizerPlayer:
             self.play_dual_thread()
 
     def build_filters(self, sample_rate):
-        self.filters = build_filter_bank(sample_rate, self.taps, self.band_gains_db)
+        self.filters = build_filter_bank(
+            sample_rate,
+            self.taps,
+            self.band_gains_db,
+            self.filter_type,
+        )
 
     def write_filtered_audio_to_buffer_dual_thread(self, wav_file):
         channels = wav_file.getnchannels()
@@ -270,10 +301,12 @@ def play_wav_with_filter_dual_thread(
     band_gains_db=None,
     ring_buffer_blocks=DEFAULT_RING_BUFFER_BLOCKS,
     prefill_blocks=DEFAULT_PREFILL_BLOCKS,
+    filter_type=FILTER_TYPE_SINC,
 ):
     player = EqualizerPlayer(
         file_path,
         BUFFER_MODE_DUAL_THREAD,
+        filter_type,
         taps,
         block_size,
         ring_buffer_blocks,
@@ -289,10 +322,12 @@ def play_wav_with_filter_single_thread(
     block_size=DEFAULT_BLOCK_SIZE,
     band_gains_db=None,
     ring_buffer_blocks=DEFAULT_RING_BUFFER_BLOCKS,
+    filter_type=FILTER_TYPE_SINC,
 ):
     player = EqualizerPlayer(
         file_path,
         BUFFER_MODE_SINGLE_THREAD,
+        filter_type,
         taps,
         block_size,
         ring_buffer_blocks,
