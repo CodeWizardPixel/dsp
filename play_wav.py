@@ -1,14 +1,22 @@
+import time
 import wave
 from array import array
+from threading import Thread
 
 import pyaudio
 
 from band_pass_filter import StreamingBandPassFilter
 from highpass_sinc_filter import StreamingHighPassFilter
 from lowpass_sinc_filter import DEFAULT_TAP_COUNT, StreamingLowPassFilter
+from dual_thread_ring_buffer import RingBufferDualThread
+from single_thread_ring_buffer import SingleThreadRingBuffer
 
 
-DEFAULT_BLOCK_SIZE = 1024
+DEFAULT_BLOCK_SIZE = 128
+DEFAULT_RING_BUFFER_BLOCKS = 8
+DEFAULT_PREFILL_BLOCKS = 2
+OUTPUT_CHANNELS = 1
+BYTES_PER_SAMPLE = 2
 DEFAULT_BAND_GAINS_DB = {
     1: 0,
     2: 0,
@@ -90,7 +98,74 @@ def process_samples_with_filter_bank(samples, filters):
     return mix_filter_outputs(filter_outputs)
 
 
-def play_wav_with_filter(
+def write_filtered_audio_to_buffer(wav_file, filters, block_size, ring_buffer):
+    channels = wav_file.getnchannels()
+
+    frames = wav_file.readframes(block_size)
+    while frames:
+        samples = bytes_to_samples(frames, channels)
+        filtered_samples = process_samples_with_filter_bank(samples, filters)
+        ring_buffer.write(samples_to_bytes(filtered_samples))
+        frames = wav_file.readframes(block_size)
+
+    ring_buffer.close()
+
+
+def play_wav_with_filter_dual_thread(
+    file_path,
+    taps=DEFAULT_TAP_COUNT,
+    block_size=DEFAULT_BLOCK_SIZE,
+    band_gains_db=None,
+):
+    wav_file = wave.open(file_path, "rb")
+    sample_rate = wav_file.getframerate()
+    filters = build_filter_bank(sample_rate, taps, band_gains_db)
+    bytes_per_block = block_size * OUTPUT_CHANNELS * BYTES_PER_SAMPLE
+    ring_buffer = RingBufferDualThread(bytes_per_block * DEFAULT_RING_BUFFER_BLOCKS)
+    prefill_size = bytes_per_block * DEFAULT_PREFILL_BLOCKS
+
+    producer = Thread(
+        target=write_filtered_audio_to_buffer,
+        args=(wav_file, filters, block_size, ring_buffer),
+    )
+    producer.start()
+
+    while ring_buffer.available() < prefill_size and producer.is_alive():
+        time.sleep(0.001)
+
+    def play_from_ring_buffer_dual_thread(in_data, frame_count, time_info, status_flags):
+        bytes_needed = frame_count * OUTPUT_CHANNELS * BYTES_PER_SAMPLE
+        data, finished = ring_buffer.read(bytes_needed)
+
+        if finished:
+            return data, pyaudio.paComplete
+
+        return data, pyaudio.paContinue
+
+    audio = pyaudio.PyAudio()
+    stream = audio.open(
+        format=pyaudio.paInt16,
+        channels=OUTPUT_CHANNELS,
+        rate=sample_rate,
+        output=True,
+        frames_per_buffer=block_size,
+        stream_callback=play_from_ring_buffer_dual_thread,
+        start=False,
+    )
+
+    stream.start_stream()
+
+    while stream.is_active():
+        time.sleep(0.05)
+
+    stream.stop_stream()
+    stream.close()
+    audio.terminate()
+    producer.join()
+    wav_file.close()
+
+
+def play_wav_with_filter_single_thread(
     file_path,
     taps=DEFAULT_TAP_COUNT,
     block_size=DEFAULT_BLOCK_SIZE,
@@ -100,11 +175,13 @@ def play_wav_with_filter(
     channels = wav_file.getnchannels()
     sample_rate = wav_file.getframerate()
     filters = build_filter_bank(sample_rate, taps, band_gains_db)
+    bytes_per_block = block_size * OUTPUT_CHANNELS * BYTES_PER_SAMPLE
+    ring_buffer = SingleThreadRingBuffer(bytes_per_block * DEFAULT_RING_BUFFER_BLOCKS)
 
     audio = pyaudio.PyAudio()
     stream = audio.open(
         format=pyaudio.paInt16,
-        channels=1,
+        channels=OUTPUT_CHANNELS,
         rate=sample_rate,
         output=True,
         frames_per_buffer=block_size,
@@ -114,8 +191,24 @@ def play_wav_with_filter(
     while frames:
         samples = bytes_to_samples(frames, channels)
         filtered_samples = process_samples_with_filter_bank(samples, filters)
-        stream.write(samples_to_bytes(filtered_samples))
+        ring_buffer.write(samples_to_bytes(filtered_samples))
+
+        data, finished = ring_buffer.read(bytes_per_block)
+        stream.write(data)
+
+        if finished:
+            break
+
         frames = wav_file.readframes(block_size)
+
+    ring_buffer.close()
+
+    while ring_buffer.available() > 0:
+        data, finished = ring_buffer.read(bytes_per_block)
+        stream.write(data)
+
+        if finished:
+            break
 
     stream.stop_stream()
     stream.close()
@@ -124,4 +217,4 @@ def play_wav_with_filter(
 
 
 if __name__ == "__main__":
-    play_wav_with_filter("audio1.wav")
+    play_wav_with_filter_single_thread("audio1.wav")
