@@ -1,5 +1,3 @@
-from collections import deque
-
 from scipy.fft import fftshift, irfft, rfftfreq
 
 from filters.chebyshev.chebyshev_bandpass_filter import chebyshev_band_pass_gain
@@ -9,7 +7,13 @@ from filters.chebyshev.chebyshev_lowpass_filter import (
     DEFAULT_RIPPLE_DB,
     chebyshev_low_pass_gain,
 )
-from util import build_hamming_window, db_to_gain, ripple_db_to_epsilon
+from util import (
+    StreamingFirFilter,
+    build_hamming_window,
+    db_to_gain,
+    make_odd,
+    ripple_db_to_epsilon,
+)
 
 
 CHEBYSHEV_BANDS = [
@@ -22,8 +26,8 @@ CHEBYSHEV_BANDS = [
     ("band_pass", 6300, 12700),
     ("high_pass", 12700, 22050),
 ]
-DEFAULT_TAP_COUNT = 129
-DEFAULT_FFT_SIZE = 2048
+DEFAULT_TAP_COUNT = 2049
+DEFAULT_FFT_SIZE = 8192
 
 
 class ChebyshevFilterBank:
@@ -39,15 +43,15 @@ class ChebyshevFilterBank:
         self.sample_rate = sample_rate
         self.order = order
         self.epsilon = ripple_db_to_epsilon(ripple_db)
-        self.tap_count = tap_count
-        self.fft_size = fft_size
+        self.tap_count = make_odd(tap_count)
+        self.fft_size = max(fft_size, self.tap_count * 4)
         self.band_gains_db = band_gains_db.copy()
         self.band_gains = {}
-        self.history = deque([0] * self.tap_count, maxlen=self.tap_count)
 
         for band_number, gain_db in self.band_gains_db.items():
             self.band_gains[band_number] = db_to_gain(gain_db)
 
+        self.filter = StreamingFirFilter([0] * self.tap_count)
         self.rebuild_kernel()
 
     def set_band_gain(self, band_number, gain_db):
@@ -68,53 +72,59 @@ class ChebyshevFilterBank:
         kernel = impulse_response[center - half_taps:center + half_taps + 1]
         window = build_hamming_window(len(kernel))
 
-        self.kernel = [
+        self.filter.kernel = [
             kernel_value * window_value
             for kernel_value, window_value in zip(kernel, window)
         ]
+        self.filter.kernel_fft_by_size = {}
 
     def combined_gain(self, frequency_hz):
-        gain = 0
+        band_index, band = self.band_for_frequency(frequency_hz)
+        if band is None:
+            return 0
+
+        filter_type, low_cutoff_hz, high_cutoff_hz = band
+        band_gain = self.band_gains[band_index]
+
+        if filter_type == "low_pass":
+            filter_gain = chebyshev_low_pass_gain(
+                frequency_hz,
+                high_cutoff_hz,
+                self.order,
+                self.epsilon,
+            )
+        elif filter_type == "high_pass":
+            filter_gain = chebyshev_high_pass_gain(
+                frequency_hz,
+                low_cutoff_hz,
+                self.order,
+                self.epsilon,
+            )
+        else:
+            filter_gain = chebyshev_band_pass_gain(
+                frequency_hz,
+                low_cutoff_hz,
+                high_cutoff_hz,
+                self.order,
+                self.epsilon,
+            )
+
+        return filter_gain * band_gain
+
+    def band_for_frequency(self, frequency_hz):
+        nyquist_hz = self.sample_rate / 2
 
         for band_index, band in enumerate(CHEBYSHEV_BANDS, start=1):
             filter_type, low_cutoff_hz, high_cutoff_hz = band
-            band_gain = self.band_gains[band_index]
+            high_cutoff_hz = min(high_cutoff_hz, nyquist_hz)
 
-            if filter_type == "low_pass":
-                filter_gain = chebyshev_low_pass_gain(
-                    frequency_hz,
-                    high_cutoff_hz,
-                    self.order,
-                    self.epsilon,
-                )
-            elif filter_type == "high_pass":
-                filter_gain = chebyshev_high_pass_gain(
-                    frequency_hz,
-                    low_cutoff_hz,
-                    self.order,
-                    self.epsilon,
-                )
-            else:
-                filter_gain = chebyshev_band_pass_gain(
-                    frequency_hz,
-                    low_cutoff_hz,
-                    high_cutoff_hz,
-                    self.order,
-                    self.epsilon,
-                )
+            if filter_type == "high_pass":
+                if low_cutoff_hz <= frequency_hz <= nyquist_hz:
+                    return band_index, band
+            elif low_cutoff_hz <= frequency_hz < high_cutoff_hz:
+                return band_index, band
 
-            gain += filter_gain * band_gain
-
-        return gain
-
-    def process_sample(self, sample):
-        self.history.appendleft(sample)
-
-        output = 0
-        for sample_value, kernel_value in zip(self.history, self.kernel):
-            output += sample_value * kernel_value
-
-        return output
+        return None, None
 
     def process_samples(self, samples):
-        return [self.process_sample(sample) for sample in samples]
+        return self.filter.process_samples(samples)
