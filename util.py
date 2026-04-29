@@ -1,7 +1,12 @@
 import math
 from collections import deque
 
-from scipy.fft import irfft, rfft, rfftfreq
+from scipy.fft import irfft, next_fast_len, rfft, rfftfreq
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
 
 
 def make_odd(value):
@@ -110,6 +115,7 @@ def convolve(samples, kernel, gain_db=0):
 class StreamingFirFilter:
     def __init__(self, kernel, gain_db=0):
         self.kernel = kernel
+        self.kernel_fft_by_size = {}
         self.history = deque([0] * len(kernel), maxlen=len(kernel))
         self.set_gain_db(gain_db)
 
@@ -127,7 +133,46 @@ class StreamingFirFilter:
         return filtered_sample * self.gain
 
     def process_samples(self, samples):
+        if np is not None:
+            return self.process_samples_fast(samples)
+
         return [self.process_sample(sample) for sample in samples]
+
+    def process_samples_fast(self, samples):
+        samples = list(samples)
+        if not samples:
+            return []
+
+        history_size = len(self.kernel)
+        previous_count = history_size - 1
+        previous_samples = []
+
+        if previous_count > 0:
+            previous_samples = list(reversed(self.history))[-previous_count:]
+
+        extended_samples = previous_samples + samples
+        filtered_samples = self.convolve_block(extended_samples)
+        start = history_size - 1
+        end = start + len(samples)
+        newest_history = extended_samples[-history_size:]
+        self.history = deque(reversed(newest_history), maxlen=history_size)
+
+        return (filtered_samples[start:end] * self.gain).tolist()
+
+    def convolve_block(self, samples):
+        if len(self.kernel) <= 128:
+            return np.convolve(samples, self.kernel, mode="full")
+
+        output_size = len(samples) + len(self.kernel) - 1
+        fft_size = next_fast_len(output_size)
+        kernel_fft = self.kernel_fft_by_size.get(fft_size)
+
+        if kernel_fft is None:
+            kernel_fft = rfft(self.kernel, fft_size)
+            self.kernel_fft_by_size[fft_size] = kernel_fft
+
+        samples_fft = rfft(samples, fft_size)
+        return irfft(samples_fft * kernel_fft, fft_size)[:output_size]
 
 
 class BlockFrequencyFilter:

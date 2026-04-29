@@ -7,9 +7,10 @@ import pyaudio
 
 from buffers.dual_thread_ring_buffer import RingBufferDualThread
 from filters.chebyshev.chebyshev_filter_bank import ChebyshevFilterBank
-from filters.sinc.bandpass_filter import StreamingBandPassFilter
-from filters.sinc.highpass_sinc_filter import StreamingHighPassFilter
-from filters.sinc.lowpass_sinc_filter import DEFAULT_TAP_COUNT, StreamingLowPassFilter
+from filters.sinc.sinc_filter_bank import (
+    DEFAULT_TAP_COUNT,
+    HammingSincFilterBank,
+)
 from buffers.single_thread_ring_buffer import SingleThreadRingBuffer
 
 
@@ -73,16 +74,7 @@ def build_sinc_filter_bank(sample_rate, taps, band_gains_db=None):
     if band_gains_db is not None:
         gains.update(band_gains_db)
 
-    return [
-        StreamingLowPassFilter(sample_rate, 100, taps, gains[1]),
-        StreamingBandPassFilter(sample_rate, 100, 300, taps, gains[2]),
-        StreamingBandPassFilter(sample_rate, 300, 700, taps, gains[3]),
-        StreamingBandPassFilter(sample_rate, 700, 1500, taps, gains[4]),
-        StreamingBandPassFilter(sample_rate, 1500, 3100, taps, gains[5]),
-        StreamingBandPassFilter(sample_rate, 3100, 6300, taps, gains[6]),
-        StreamingBandPassFilter(sample_rate, 6300, 12700, taps, gains[7]),
-        StreamingHighPassFilter(sample_rate, 12700, taps, gains[8]),
-    ]
+    return HammingSincFilterBank(sample_rate, gains, taps)
 
 
 def build_chebyshev_filter_bank(sample_rate, band_gains_db=None):
