@@ -17,7 +17,7 @@ from filters.sinc.sinc_filter_bank import (
 
 DEFAULT_BLOCK_SIZE = 64
 DEFAULT_RING_BUFFER_SIZE_BYTES = 32
-RING_BUFFER_INPUT_FRAMES_PER_CYCLE = 8
+RING_BUFFER_INPUT_FRAMES_PER_CYCLE = 4
 RING_BUFFER_OUTPUT_FRAMES_PER_CYCLE = 1
 SAMPLE_READ_TIMEOUT_SECONDS = 0.01
 BUFFER_MODE_DUAL_THREAD = "dual_thread"
@@ -179,20 +179,50 @@ class EqualizerPlayer:
 
     def write_filtered_audio_to_buffer_dual_thread(self, wav_file):
         channels = wav_file.getnchannels()
+        bytes_per_write = min(
+            RING_BUFFER_INPUT_FRAMES_PER_CYCLE * BYTES_PER_SAMPLE,
+            max(BYTES_PER_SAMPLE, self.ring_buffer.capacity // 2),
+        )
+        prefetch_bytes = max(
+            self.ring_buffer.capacity,
+            DEFAULT_BLOCK_SIZE * OUTPUT_CHANNELS * BYTES_PER_SAMPLE,
+        )
+        pending = bytearray()
+        wav_has_data = True
 
-        while not self.stopped:
-            free_space = self.ring_buffer.wait_for_free_space()
-            if free_space < BYTES_PER_SAMPLE:
-                break
-
-            frames_to_read = free_space // BYTES_PER_SAMPLE
+        def read_filtered_bytes(frames_to_read):
             frames = wav_file.readframes(frames_to_read)
             if not frames:
-                break
+                return b""
 
             samples = bytes_to_samples(frames, channels)
             filtered_samples = process_samples_with_filter_bank(samples, self.filters)
-            self.ring_buffer.write(samples_to_bytes(filtered_samples))
+            return samples_to_bytes(filtered_samples)
+
+        while not self.stopped:
+            while wav_has_data and len(pending) < prefetch_bytes and not self.stopped:
+                filtered_bytes = read_filtered_bytes(DEFAULT_BLOCK_SIZE)
+                if not filtered_bytes:
+                    wav_has_data = False
+                    break
+
+                pending += filtered_bytes
+
+            if not pending:
+                break
+
+            required_space = min(bytes_per_write, len(pending))
+            free_space = self.ring_buffer.wait_for_free_space(required_space)
+            if free_space < BYTES_PER_SAMPLE:
+                break
+
+            bytes_to_write = min(len(pending), free_space)
+            bytes_to_write -= bytes_to_write % BYTES_PER_SAMPLE
+            if bytes_to_write == 0:
+                break
+
+            self.ring_buffer.write(pending[:bytes_to_write])
+            del pending[:bytes_to_write]
 
         self.ring_buffer.close()
 

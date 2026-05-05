@@ -25,10 +25,12 @@ from play_wav import (
     BUFFER_MODE_DUAL_THREAD,
     BUFFER_MODE_SHIFTING,
     BUFFER_MODE_SINGLE_THREAD,
+    BYTES_PER_SAMPLE,
     DEFAULT_RING_BUFFER_SIZE_BYTES,
     EqualizerPlayer,
     FILTER_TYPE_CHEBYSHEV,
     FILTER_TYPE_SINC,
+    RING_BUFFER_INPUT_FRAMES_PER_CYCLE,
 )
 
 
@@ -211,8 +213,9 @@ class MainWindow(QMainWindow):
 
     def current_ring_buffer_size_bytes(self):
         value = self.ring_buffer_size_bytes.value()
+        buffer_mode = self.buffer_mode.currentData()
 
-        if self.buffer_mode.currentData() == BUFFER_MODE_SHIFTING:
+        if buffer_mode == BUFFER_MODE_SHIFTING:
             remainder = value % 4
             if remainder != 0:
                 value = min(
@@ -220,8 +223,16 @@ class MainWindow(QMainWindow):
                     self.ring_buffer_size_bytes.maximum(),
                 )
                 self.ring_buffer_size_bytes.setValue(value)
-        elif value % 2 != 0:
-            value = min(value + 1, self.ring_buffer_size_bytes.maximum())
+        else:
+            min_ring_buffer_size = (
+                RING_BUFFER_INPUT_FRAMES_PER_CYCLE * BYTES_PER_SAMPLE
+            )
+            if value < min_ring_buffer_size:
+                value = min_ring_buffer_size
+
+            if value % 2 != 0:
+                value = min(value + 1, self.ring_buffer_size_bytes.maximum())
+
             self.ring_buffer_size_bytes.setValue(value)
 
         return value

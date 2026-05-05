@@ -108,9 +108,11 @@ class RingBufferDualThread:
         with self.condition:
             return self.capacity - self.size
 
-    def wait_for_free_space(self):
+    def wait_for_free_space(self, required_space=1):
+        required_space = min(required_space, self.capacity)
+
         with self.condition:
-            while self.size == self.capacity and not self.closed:
+            while self.capacity - self.size < required_space and not self.closed:
                 self.condition.wait()
 
             if self.closed:
