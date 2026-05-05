@@ -24,9 +24,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from play_wav import (
     BUFFER_MODE_DUAL_THREAD,
     BUFFER_MODE_SINGLE_THREAD,
-    DEFAULT_BLOCK_SIZE,
-    DEFAULT_PREFILL_BLOCKS,
-    DEFAULT_RING_BUFFER_BLOCKS,
+    DEFAULT_RING_BUFFER_SIZE_BYTES,
     EqualizerPlayer,
     FILTER_TYPE_CHEBYSHEV,
     FILTER_TYPE_SINC,
@@ -54,9 +52,7 @@ class PlayerWorker(QObject):
         file_path,
         buffer_mode,
         filter_type,
-        block_size,
-        ring_buffer_blocks,
-        prefill_blocks,
+        ring_buffer_size_bytes,
         band_gains_db,
     ):
         super().__init__()
@@ -64,9 +60,7 @@ class PlayerWorker(QObject):
             file_path=file_path,
             buffer_mode=buffer_mode,
             filter_type=filter_type,
-            block_size=block_size,
-            ring_buffer_blocks=ring_buffer_blocks,
-            prefill_blocks=prefill_blocks,
+            ring_buffer_size_bytes=ring_buffer_size_bytes,
             band_gains_db=band_gains_db,
         )
 
@@ -134,29 +128,17 @@ class MainWindow(QMainWindow):
         self.filter_type.addItem("Окно Хемминга FIR", FILTER_TYPE_SINC)
         self.filter_type.addItem("Чебышев I рода IIR", FILTER_TYPE_CHEBYSHEV)
 
-        self.block_size = QSpinBox()
-        self.block_size.setRange(64, 8192)
-        self.block_size.setSingleStep(64)
-        self.block_size.setValue(DEFAULT_BLOCK_SIZE)
-
-        self.ring_buffer_blocks = QSpinBox()
-        self.ring_buffer_blocks.setRange(1, 128)
-        self.ring_buffer_blocks.setValue(DEFAULT_RING_BUFFER_BLOCKS)
-
-        self.prefill_blocks = QSpinBox()
-        self.prefill_blocks.setRange(0, 64)
-        self.prefill_blocks.setValue(DEFAULT_PREFILL_BLOCKS)
+        self.ring_buffer_size_bytes = QSpinBox()
+        self.ring_buffer_size_bytes.setRange(2, 32)
+        self.ring_buffer_size_bytes.setSingleStep(2)
+        self.ring_buffer_size_bytes.setValue(DEFAULT_RING_BUFFER_SIZE_BYTES)
 
         layout.addWidget(QLabel("Тип буфера"), 0, 0)
         layout.addWidget(self.buffer_mode, 0, 1)
         layout.addWidget(QLabel("Тип фильтра"), 0, 2)
         layout.addWidget(self.filter_type, 0, 3)
-        layout.addWidget(QLabel("Размер блока"), 1, 0)
-        layout.addWidget(self.block_size, 1, 1)
-        layout.addWidget(QLabel("Блоков в кольце"), 1, 2)
-        layout.addWidget(self.ring_buffer_blocks, 1, 3)
-        layout.addWidget(QLabel("Предзаполнение"), 2, 0)
-        layout.addWidget(self.prefill_blocks, 2, 1)
+        layout.addWidget(QLabel("Размер кольца, байт"), 1, 0)
+        layout.addWidget(self.ring_buffer_size_bytes, 1, 1)
 
         return group
 
@@ -225,6 +207,15 @@ class MainWindow(QMainWindow):
             for band_number, slider in self.gain_sliders.items()
         }
 
+    def current_ring_buffer_size_bytes(self):
+        value = self.ring_buffer_size_bytes.value()
+
+        if value % 2 != 0:
+            value = min(value + 1, self.ring_buffer_size_bytes.maximum())
+            self.ring_buffer_size_bytes.setValue(value)
+
+        return value
+
     def change_band_gain(self, band_number, gain_db):
         self.gain_labels[band_number].setText(f"{gain_db} dB")
 
@@ -244,9 +235,7 @@ class MainWindow(QMainWindow):
             file_path=self.file_path,
             buffer_mode=self.buffer_mode.currentData(),
             filter_type=self.filter_type.currentData(),
-            block_size=self.block_size.value(),
-            ring_buffer_blocks=self.ring_buffer_blocks.value(),
-            prefill_blocks=self.prefill_blocks.value(),
+            ring_buffer_size_bytes=self.current_ring_buffer_size_bytes(),
             band_gains_db=self.current_band_gains(),
         )
         self.worker.moveToThread(self.thread)

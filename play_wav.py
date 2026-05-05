@@ -15,8 +15,8 @@ from buffers.single_thread_ring_buffer import SingleThreadRingBuffer
 
 
 DEFAULT_BLOCK_SIZE = 128
-DEFAULT_RING_BUFFER_BLOCKS = 8
-DEFAULT_PREFILL_BLOCKS = 2
+DEFAULT_RING_BUFFER_SIZE_BYTES = 32
+SAMPLE_READ_TIMEOUT_SECONDS = 0.01
 BUFFER_MODE_DUAL_THREAD = "dual_thread"
 BUFFER_MODE_SINGLE_THREAD = "single_thread"
 FILTER_TYPE_SINC = "sinc"
@@ -66,6 +66,11 @@ def samples_to_bytes(samples):
     for sample in samples:
         pcm.append(clamp_int16(sample))
 
+    return pcm.tobytes()
+
+
+def sample_to_bytes(sample):
+    pcm = array("h", [clamp_int16(sample)])
     return pcm.tobytes()
 
 
@@ -120,18 +125,15 @@ class EqualizerPlayer:
         buffer_mode=BUFFER_MODE_DUAL_THREAD,
         filter_type=FILTER_TYPE_SINC,
         taps=DEFAULT_TAP_COUNT,
-        block_size=DEFAULT_BLOCK_SIZE,
-        ring_buffer_blocks=DEFAULT_RING_BUFFER_BLOCKS,
-        prefill_blocks=DEFAULT_PREFILL_BLOCKS,
+        ring_buffer_size_bytes=DEFAULT_RING_BUFFER_SIZE_BYTES,
         band_gains_db=None,
     ):
         self.file_path = file_path
         self.buffer_mode = buffer_mode
         self.filter_type = filter_type
         self.taps = taps
-        self.block_size = block_size
-        self.ring_buffer_blocks = ring_buffer_blocks
-        self.prefill_blocks = prefill_blocks
+        self.block_size = DEFAULT_BLOCK_SIZE
+        self.ring_buffer_size_bytes = ring_buffer_size_bytes
         self.band_gains_db = DEFAULT_BAND_GAINS_DB.copy()
         self.filters = []
         self.ring_buffer = None
@@ -186,11 +188,11 @@ class EqualizerPlayer:
         sample_rate = wav_file.getframerate()
         self.build_filters(sample_rate)
 
-        bytes_per_block = self.block_size * OUTPUT_CHANNELS * BYTES_PER_SAMPLE
-        self.ring_buffer = RingBufferDualThread(
-            bytes_per_block * self.ring_buffer_blocks
+        self.ring_buffer = RingBufferDualThread(self.ring_buffer_size_bytes)
+        output_frames_per_buffer = max(
+            1,
+            self.ring_buffer_size_bytes // (OUTPUT_CHANNELS * BYTES_PER_SAMPLE),
         )
-        prefill_size = bytes_per_block * self.prefill_blocks
 
         producer = Thread(
             target=self.write_filtered_audio_to_buffer_dual_thread,
@@ -198,21 +200,27 @@ class EqualizerPlayer:
         )
         producer.start()
 
-        while (
-            self.ring_buffer.available() < prefill_size
-            and producer.is_alive()
-            and not self.stopped
-        ):
-            time.sleep(0.001)
-
         def play_from_ring_buffer(in_data, frame_count, time_info, status_flags):
+            data = bytearray()
+            finished = False
+
+            for _frame_index in range(frame_count * OUTPUT_CHANNELS):
+                sample_data, finished = self.ring_buffer.read_sample(
+                    SAMPLE_READ_TIMEOUT_SECONDS
+                )
+                data += sample_data
+
+                if finished or self.stopped:
+                    break
+
             bytes_needed = frame_count * OUTPUT_CHANNELS * BYTES_PER_SAMPLE
-            data, finished = self.ring_buffer.read(bytes_needed)
+            if len(data) < bytes_needed:
+                data += bytes(bytes_needed - len(data))
 
             if finished or self.stopped:
-                return data, pyaudio.paComplete
+                return bytes(data), pyaudio.paComplete
 
-            return data, pyaudio.paContinue
+            return bytes(data), pyaudio.paContinue
 
         audio = pyaudio.PyAudio()
         stream = audio.open(
@@ -220,7 +228,7 @@ class EqualizerPlayer:
             channels=OUTPUT_CHANNELS,
             rate=sample_rate,
             output=True,
-            frames_per_buffer=self.block_size,
+            frames_per_buffer=output_frames_per_buffer,
             stream_callback=play_from_ring_buffer,
             start=False,
         )
@@ -244,9 +252,7 @@ class EqualizerPlayer:
         self.build_filters(sample_rate)
 
         bytes_per_block = self.block_size * OUTPUT_CHANNELS * BYTES_PER_SAMPLE
-        self.ring_buffer = SingleThreadRingBuffer(
-            bytes_per_block * self.ring_buffer_blocks
-        )
+        self.ring_buffer = SingleThreadRingBuffer(self.ring_buffer_size_bytes)
 
         audio = pyaudio.PyAudio()
         stream = audio.open(
@@ -261,21 +267,37 @@ class EqualizerPlayer:
         while frames and not self.stopped:
             samples = bytes_to_samples(frames, channels)
             filtered_samples = process_samples_with_filter_bank(samples, self.filters)
-            self.ring_buffer.write(samples_to_bytes(filtered_samples))
 
-            data, finished = self.ring_buffer.read(bytes_per_block)
-            stream.write(data)
+            data = bytearray()
+            for sample in filtered_samples:
+                self.ring_buffer.write(sample_to_bytes(sample))
+                sample_data, finished = self.ring_buffer.read_sample()
+                data += sample_data
 
-            if finished:
-                break
+                if finished or self.stopped:
+                    break
+
+            if data:
+                stream.write(bytes(data))
 
             frames = wav_file.readframes(self.block_size)
 
         self.ring_buffer.close()
 
         while self.ring_buffer.available() > 0 and not self.stopped:
-            data, finished = self.ring_buffer.read(bytes_per_block)
-            stream.write(data)
+            data = bytearray()
+
+            while self.ring_buffer.available() > 0 and len(data) < bytes_per_block:
+                sample_data, finished = self.ring_buffer.read_sample()
+                data += sample_data
+
+                if finished:
+                    break
+
+            if not data:
+                break
+
+            stream.write(bytes(data))
 
             if finished:
                 break
@@ -289,10 +311,8 @@ class EqualizerPlayer:
 def play_wav_with_filter_dual_thread(
     file_path,
     taps=DEFAULT_TAP_COUNT,
-    block_size=DEFAULT_BLOCK_SIZE,
     band_gains_db=None,
-    ring_buffer_blocks=DEFAULT_RING_BUFFER_BLOCKS,
-    prefill_blocks=DEFAULT_PREFILL_BLOCKS,
+    ring_buffer_size_bytes=DEFAULT_RING_BUFFER_SIZE_BYTES,
     filter_type=FILTER_TYPE_SINC,
 ):
     player = EqualizerPlayer(
@@ -300,9 +320,7 @@ def play_wav_with_filter_dual_thread(
         BUFFER_MODE_DUAL_THREAD,
         filter_type,
         taps,
-        block_size,
-        ring_buffer_blocks,
-        prefill_blocks,
+        ring_buffer_size_bytes,
         band_gains_db,
     )
     player.play()
@@ -311,9 +329,8 @@ def play_wav_with_filter_dual_thread(
 def play_wav_with_filter_single_thread(
     file_path,
     taps=DEFAULT_TAP_COUNT,
-    block_size=DEFAULT_BLOCK_SIZE,
     band_gains_db=None,
-    ring_buffer_blocks=DEFAULT_RING_BUFFER_BLOCKS,
+    ring_buffer_size_bytes=DEFAULT_RING_BUFFER_SIZE_BYTES,
     filter_type=FILTER_TYPE_SINC,
 ):
     player = EqualizerPlayer(
@@ -321,9 +338,7 @@ def play_wav_with_filter_single_thread(
         BUFFER_MODE_SINGLE_THREAD,
         filter_type,
         taps,
-        block_size,
-        ring_buffer_blocks,
-        0,
+        ring_buffer_size_bytes,
         band_gains_db,
     )
     player.play()

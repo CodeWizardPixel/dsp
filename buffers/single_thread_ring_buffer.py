@@ -1,5 +1,10 @@
 class SingleThreadRingBuffer:
     def __init__(self, capacity):
+        if capacity < 2 or capacity > 32 or capacity % 2 != 0:
+            raise ValueError(
+                "Ring buffer capacity must be an even value between 2 and 32 bytes"
+            )
+
         self.buffer = bytearray(capacity)
         self.capacity = capacity
         self.read_index = 0
@@ -46,6 +51,12 @@ class SingleThreadRingBuffer:
             data += bytes(size - len(data))
 
         return bytes(data), finished
+
+    def read_sample(self):
+        return self.read(2)
+
+    def read_sample_nonblocking(self):
+        return self.read(2)
 
     def close(self):
         self.closed = True
