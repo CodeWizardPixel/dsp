@@ -160,7 +160,9 @@ class EqualizerPlayer:
             self.ring_buffer.close()
 
     def play(self):
-        if self.buffer_mode in (BUFFER_MODE_SINGLE_THREAD, BUFFER_MODE_SHIFTING):
+        if self.buffer_mode == BUFFER_MODE_SHIFTING:
+            self.play_shifting_buffer()
+        elif self.buffer_mode == BUFFER_MODE_SINGLE_THREAD:
             self.play_single_thread()
         else:
             self.play_dual_thread()
@@ -254,10 +256,7 @@ class EqualizerPlayer:
         self.build_filters(sample_rate)
 
         bytes_per_block = self.block_size * OUTPUT_CHANNELS * BYTES_PER_SAMPLE
-        if self.buffer_mode == BUFFER_MODE_SHIFTING:
-            self.ring_buffer = ShiftingBuffer(self.ring_buffer_size_bytes)
-        else:
-            self.ring_buffer = SingleThreadRingBuffer(self.ring_buffer_size_bytes)
+        self.ring_buffer = SingleThreadRingBuffer(self.ring_buffer_size_bytes)
 
         audio = pyaudio.PyAudio()
         stream = audio.open(
@@ -303,6 +302,68 @@ class EqualizerPlayer:
                 break
 
             stream.write(bytes(data))
+
+            if finished:
+                break
+
+        stream.stop_stream()
+        stream.close()
+        audio.terminate()
+        wav_file.close()
+
+    def play_shifting_buffer(self):
+        wav_file = wave.open(self.file_path, "rb")
+        channels = wav_file.getnchannels()
+        input_bytes_per_frame = channels * wav_file.getsampwidth()
+        sample_rate = wav_file.getframerate()
+        self.build_filters(sample_rate)
+
+        self.ring_buffer = ShiftingBuffer(self.ring_buffer_size_bytes)
+        input_frames_per_chunk = max(
+            1,
+            self.ring_buffer.part_capacity // input_bytes_per_frame,
+        )
+        output_bytes_per_chunk = self.ring_buffer.part_capacity
+        output_frames_per_buffer = max(
+            1,
+            output_bytes_per_chunk // (OUTPUT_CHANNELS * BYTES_PER_SAMPLE),
+        )
+
+        audio = pyaudio.PyAudio()
+        stream = audio.open(
+            format=pyaudio.paInt16,
+            channels=OUTPUT_CHANNELS,
+            rate=sample_rate,
+            output=True,
+            frames_per_buffer=output_frames_per_buffer,
+        )
+
+        frames = wav_file.readframes(input_frames_per_chunk)
+        while frames and not self.stopped:
+            samples = bytes_to_samples(frames, channels)
+            filtered_samples = process_samples_with_filter_bank(samples, self.filters)
+
+            for sample in filtered_samples:
+                self.ring_buffer.write(sample_to_bytes(sample))
+
+                if self.ring_buffer.available() >= output_bytes_per_chunk:
+                    data, finished = self.ring_buffer.read(output_bytes_per_chunk)
+                    stream.write(data)
+
+                    if finished or self.stopped:
+                        break
+
+            frames = wav_file.readframes(input_frames_per_chunk)
+
+        self.ring_buffer.close()
+
+        while self.ring_buffer.available() > 0 and not self.stopped:
+            data, finished = self.ring_buffer.read(output_bytes_per_chunk)
+
+            if not data:
+                break
+
+            stream.write(data)
 
             if finished:
                 break

@@ -1,8 +1,8 @@
 class ShiftingBuffer:
     def __init__(self, capacity):
-        if capacity < 4 or capacity > 32 or capacity % 4 != 0:
+        if capacity < 4 or capacity > 512 or capacity % 4 != 0:
             raise ValueError(
-                "Shifting buffer capacity must be a multiple of 4 between 4 and 32 bytes"
+                "Shifting buffer capacity must be a multiple of 4 between 4 and 512 bytes"
             )
 
         self.capacity = capacity

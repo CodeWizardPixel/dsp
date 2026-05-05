@@ -131,7 +131,7 @@ class MainWindow(QMainWindow):
         self.filter_type.addItem("Чебышев I рода IIR", FILTER_TYPE_CHEBYSHEV)
 
         self.ring_buffer_size_bytes = QSpinBox()
-        self.ring_buffer_size_bytes.setRange(2, 32)
+        self.ring_buffer_size_bytes.setRange(2, 512)
         self.ring_buffer_size_bytes.setSingleStep(2)
         self.ring_buffer_size_bytes.setValue(DEFAULT_RING_BUFFER_SIZE_BYTES)
 
