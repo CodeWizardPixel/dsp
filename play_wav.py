@@ -17,7 +17,7 @@ from filters.sinc.sinc_filter_bank import (
 
 DEFAULT_BLOCK_SIZE = 128
 DEFAULT_RING_BUFFER_SIZE_BYTES = 32
-RING_BUFFER_INPUT_FRAMES_PER_CYCLE = 6
+RING_BUFFER_INPUT_FRAMES_PER_CYCLE = 4
 SAMPLE_READ_TIMEOUT_SECONDS = 0.01
 BUFFER_MODE_DUAL_THREAD = "dual_thread"
 BUFFER_MODE_SINGLE_THREAD = "single_thread"
@@ -274,20 +274,44 @@ class EqualizerPlayer:
             frames_per_buffer=RING_BUFFER_INPUT_FRAMES_PER_CYCLE,
         )
 
-        frames = wav_file.readframes(RING_BUFFER_INPUT_FRAMES_PER_CYCLE)
-        while frames and not self.stopped:
+        def write_next_frames_to_buffer(frames_to_read):
+            frames = wav_file.readframes(frames_to_read)
+            if not frames:
+                return False
+
             samples = bytes_to_samples(frames, channels)
             filtered_samples = process_samples_with_filter_bank(samples, self.filters)
 
             for sample in filtered_samples:
-                self.ring_buffer.write(sample_to_bytes(sample))
-                sample_data, finished = self.ring_buffer.read_sample()
-                stream.write(sample_data)
-
-                if finished or self.stopped:
+                if self.ring_buffer.free_space() < BYTES_PER_SAMPLE:
                     break
 
-            frames = wav_file.readframes(RING_BUFFER_INPUT_FRAMES_PER_CYCLE)
+                self.ring_buffer.write(sample_to_bytes(sample))
+
+                if self.stopped:
+                    break
+
+            return True
+
+        wav_has_data = True
+        while self.ring_buffer.free_space() >= BYTES_PER_SAMPLE and not self.stopped:
+            frames_to_read = self.ring_buffer.free_space() // BYTES_PER_SAMPLE
+            wav_has_data = write_next_frames_to_buffer(frames_to_read)
+            if not wav_has_data:
+                break
+
+        bytes_per_cycle = RING_BUFFER_INPUT_FRAMES_PER_CYCLE * BYTES_PER_SAMPLE
+        while self.ring_buffer.available() > 0 and not self.stopped:
+            data, finished = self.ring_buffer.read(bytes_per_cycle)
+            stream.write(data)
+
+            if wav_has_data and self.ring_buffer.free_space() >= bytes_per_cycle:
+                wav_has_data = write_next_frames_to_buffer(
+                    RING_BUFFER_INPUT_FRAMES_PER_CYCLE
+                )
+
+            if finished:
+                break
 
         self.ring_buffer.close()
 

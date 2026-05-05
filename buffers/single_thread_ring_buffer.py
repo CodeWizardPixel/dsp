@@ -63,3 +63,6 @@ class SingleThreadRingBuffer:
 
     def available(self):
         return self.size
+
+    def free_space(self):
+        return self.capacity - self.size
