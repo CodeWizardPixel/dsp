@@ -17,6 +17,7 @@ from filters.sinc.sinc_filter_bank import (
 
 DEFAULT_BLOCK_SIZE = 128
 DEFAULT_RING_BUFFER_SIZE_BYTES = 32
+RING_BUFFER_INPUT_FRAMES_PER_CYCLE = 6
 SAMPLE_READ_TIMEOUT_SECONDS = 0.01
 BUFFER_MODE_DUAL_THREAD = "dual_thread"
 BUFFER_MODE_SINGLE_THREAD = "single_thread"
@@ -178,12 +179,19 @@ class EqualizerPlayer:
     def write_filtered_audio_to_buffer_dual_thread(self, wav_file):
         channels = wav_file.getnchannels()
 
-        frames = wav_file.readframes(self.block_size)
-        while frames and not self.stopped:
+        while not self.stopped:
+            free_space = self.ring_buffer.wait_for_free_space()
+            if free_space < BYTES_PER_SAMPLE:
+                break
+
+            frames_to_read = free_space // BYTES_PER_SAMPLE
+            frames = wav_file.readframes(frames_to_read)
+            if not frames:
+                break
+
             samples = bytes_to_samples(frames, channels)
             filtered_samples = process_samples_with_filter_bank(samples, self.filters)
             self.ring_buffer.write(samples_to_bytes(filtered_samples))
-            frames = wav_file.readframes(self.block_size)
 
         self.ring_buffer.close()
 
@@ -255,7 +263,6 @@ class EqualizerPlayer:
         sample_rate = wav_file.getframerate()
         self.build_filters(sample_rate)
 
-        bytes_per_block = self.block_size * OUTPUT_CHANNELS * BYTES_PER_SAMPLE
         self.ring_buffer = SingleThreadRingBuffer(self.ring_buffer_size_bytes)
 
         audio = pyaudio.PyAudio()
@@ -264,44 +271,29 @@ class EqualizerPlayer:
             channels=OUTPUT_CHANNELS,
             rate=sample_rate,
             output=True,
-            frames_per_buffer=self.block_size,
+            frames_per_buffer=RING_BUFFER_INPUT_FRAMES_PER_CYCLE,
         )
 
-        frames = wav_file.readframes(self.block_size)
+        frames = wav_file.readframes(RING_BUFFER_INPUT_FRAMES_PER_CYCLE)
         while frames and not self.stopped:
             samples = bytes_to_samples(frames, channels)
             filtered_samples = process_samples_with_filter_bank(samples, self.filters)
 
-            data = bytearray()
             for sample in filtered_samples:
                 self.ring_buffer.write(sample_to_bytes(sample))
                 sample_data, finished = self.ring_buffer.read_sample()
-                data += sample_data
+                stream.write(sample_data)
 
                 if finished or self.stopped:
                     break
 
-            if data:
-                stream.write(bytes(data))
-
-            frames = wav_file.readframes(self.block_size)
+            frames = wav_file.readframes(RING_BUFFER_INPUT_FRAMES_PER_CYCLE)
 
         self.ring_buffer.close()
 
         while self.ring_buffer.available() > 0 and not self.stopped:
-            data = bytearray()
-
-            while self.ring_buffer.available() > 0 and len(data) < bytes_per_block:
-                sample_data, finished = self.ring_buffer.read_sample()
-                data += sample_data
-
-                if finished:
-                    break
-
-            if not data:
-                break
-
-            stream.write(bytes(data))
+            sample_data, finished = self.ring_buffer.read_sample()
+            stream.write(sample_data)
 
             if finished:
                 break
