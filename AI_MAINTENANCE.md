@@ -2,7 +2,7 @@
 
 Этот файл предназначен для будущей нейросети или разработчика, который будет поддерживать проект.
 
-Проект - учебный программный аудиопроигрыватель с 8-полосным эквалайзером, двумя типами кольцевого буфера и двумя семействами фильтров.
+Проект - учебный программный аудиопроигрыватель с 8-полосным эквалайзером, тремя типами буфера и двумя семействами фильтров.
 
 ## Главное ограничение
 
@@ -42,6 +42,7 @@ util.py
 buffers/
   dual_thread_ring_buffer.py
   single_thread_ring_buffer.py
+  shifting_buffer.py
 
 filters/
   sinc/
@@ -78,9 +79,19 @@ ui/
 ```python
 BUFFER_MODE_DUAL_THREAD = "dual_thread"
 BUFFER_MODE_SINGLE_THREAD = "single_thread"
+BUFFER_MODE_SHIFTING = "shifting"
+DUAL_THREAD_INPUT_FRAMES_PER_CYCLE = 2
+SINGLE_THREAD_INPUT_FRAMES_PER_CYCLE = 8
+RING_BUFFER_OUTPUT_FRAMES_PER_CYCLE = 1
 FILTER_TYPE_SINC = "sinc"
 FILTER_TYPE_CHEBYSHEV = "chebyshev"
 ```
+
+`BYTES_PER_SAMPLE = 2`, выход всегда mono int16 (`OUTPUT_CHANNELS = 1`).
+
+`DUAL_THREAD_INPUT_FRAMES_PER_CYCLE` и `SINGLE_THREAD_INPUT_FRAMES_PER_CYCLE` разделены специально: можно менять размер пачки записи для двухпоточного и однопоточного кольцевого буфера независимо.
+
+`RING_BUFFER_OUTPUT_FRAMES_PER_CYCLE = 1` означает, что кольцевые буферы отдают на воспроизведение по одному выходному сэмплу за раз. Смещающий буфер работает отдельно и отдает на `stream.write(...)` сразу вторую половину буфера.
 
 Функция `build_filter_bank(...)` выбирает семейство фильтров.
 
@@ -101,6 +112,12 @@ if hasattr(filters, "process_samples"):
 
 ## Буферы
 
+В UI размер буфера можно выбрать от `2` до `512` байт.
+
+Для кольцевых буферов размер должен быть четным.
+
+Для смещающего буфера размер должен быть кратен `4`, потому что буфер делится на две половины и каждая половина должна содержать целое число 16-битных mono-сэмплов.
+
 ### `buffers/dual_thread_ring_buffer.py`
 
 Двухпоточный кольцевой буфер.
@@ -114,10 +131,32 @@ BUFFER_MODE_DUAL_THREAD
 Схема:
 
 ```text
-producer thread -> RingBufferDualThread -> PyAudio callback
+producer thread -> pending filtered bytes -> RingBufferDualThread -> PyAudio callback
 ```
 
 Внутри используется `Condition`, потому что один поток пишет, другой читает.
+
+Producer заранее читает WAV блоками, фильтрует данные и складывает готовые PCM-байты во внутренний `pending`-буфер. Когда в кольце освобождается достаточно места, producer быстро переносит готовые байты из `pending` в `RingBufferDualThread`.
+
+Запись в кольцо идет пачками, размер пачки задает:
+
+```python
+DUAL_THREAD_INPUT_FRAMES_PER_CYCLE
+```
+
+Но пачка ограничивается половиной кольцевого буфера, чтобы producer не ждал полного опустошения буфера.
+
+Чтение из кольца в callback происходит по одному сэмплу:
+
+```python
+read_sample() -> 2 bytes
+```
+
+Размер PyAudio callback для кольцевого режима:
+
+```python
+RING_BUFFER_OUTPUT_FRAMES_PER_CYCLE = 1
+```
 
 ### `buffers/single_thread_ring_buffer.py`
 
@@ -132,10 +171,55 @@ BUFFER_MODE_SINGLE_THREAD
 Схема:
 
 ```text
-read wav -> filter -> write buffer -> read buffer -> stream.write
+fill ring buffer -> read one sample -> wait for enough free space -> write next sample batch
 ```
 
 Блокировок нет, потому что всё происходит в одном потоке.
+
+Сначала буфер заполняется до упора. Затем каретка чтения сдвигается по одному сэмплу:
+
+```python
+read_sample() -> stream.write(sample_data)
+```
+
+После каждого сдвига проверяется свободное место. Новая запись происходит только когда освободилось место под пачку:
+
+```python
+SINGLE_THREAD_INPUT_FRAMES_PER_CYCLE * BYTES_PER_SAMPLE
+```
+
+То есть при `SINGLE_THREAD_INPUT_FRAMES_PER_CYCLE = 8` запись ждет, пока чтение освободит `16` байт, и только потом читает из WAV и записывает 8 новых mono-сэмплов.
+
+### `buffers/shifting_buffer.py`
+
+Смещающий буфер.
+
+Используется в режиме:
+
+```python
+BUFFER_MODE_SHIFTING
+```
+
+Схема:
+
+```text
+WAV chunk sized like first half -> filter -> first half -> shift -> second half -> stream.write(second half)
+```
+
+Буфер разделен на две части:
+
+```text
+[ первая часть: запись ] -> shift -> [ вторая часть: чтение ]
+```
+
+В первую часть записываются отфильтрованные данные. Когда первая часть заполнена, данные смещаются во вторую часть. Воспроизведение читает из второй части целиком:
+
+```python
+output_bytes_per_chunk = self.ring_buffer.part_capacity
+stream.write(data)
+```
+
+Из WAV в этом режиме читается количество фреймов, соответствующее размеру первой половины буфера. Для mono 16-bit WAV это ровно `part_capacity` байт, для stereo 16-bit WAV `readframes(...)` читает больше байт из файла, но после `stereo_to_mono(...)` на выход попадает mono int16.
 
 ## Sinc FIR фильтры
 
@@ -233,11 +317,18 @@ ui/main_window.py
 - выбрать WAV-файл;
 - выбрать тип буфера;
 - выбрать тип фильтра;
-- изменить размер кольцевого буфера в байтах;
+- изменить размер буфера в байтах;
 - изменить усиление каждой из 8 полос от `0 dB` до `-100 dB`;
 - старт/стоп воспроизведения.
 
 Кнопка `Стоп` должна сбрасывать воспроизведение, но не закрывать приложение.
+
+При старте воспроизведения UI корректирует размер буфера:
+
+- для смещающего режима - до кратности `4`;
+- для двухпоточного кольцевого режима - не меньше `DUAL_THREAD_INPUT_FRAMES_PER_CYCLE * BYTES_PER_SAMPLE`;
+- для однопоточного кольцевого режима - не меньше `SINGLE_THREAD_INPUT_FRAMES_PER_CYCLE * BYTES_PER_SAMPLE`;
+- для кольцевых режимов - до четного значения.
 
 ## Полосы эквалайзера
 
