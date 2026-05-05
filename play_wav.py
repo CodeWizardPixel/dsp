@@ -17,7 +17,8 @@ from filters.sinc.sinc_filter_bank import (
 
 DEFAULT_BLOCK_SIZE = 64
 DEFAULT_RING_BUFFER_SIZE_BYTES = 32
-RING_BUFFER_INPUT_FRAMES_PER_CYCLE = 4
+DUAL_THREAD_INPUT_FRAMES_PER_CYCLE = 2
+SINGLE_THREAD_INPUT_FRAMES_PER_CYCLE = 8
 RING_BUFFER_OUTPUT_FRAMES_PER_CYCLE = 1
 SAMPLE_READ_TIMEOUT_SECONDS = 0.01
 BUFFER_MODE_DUAL_THREAD = "dual_thread"
@@ -180,7 +181,7 @@ class EqualizerPlayer:
     def write_filtered_audio_to_buffer_dual_thread(self, wav_file):
         channels = wav_file.getnchannels()
         bytes_per_write = min(
-            RING_BUFFER_INPUT_FRAMES_PER_CYCLE * BYTES_PER_SAMPLE,
+            DUAL_THREAD_INPUT_FRAMES_PER_CYCLE * BYTES_PER_SAMPLE,
             max(BYTES_PER_SAMPLE, self.ring_buffer.capacity // 2),
         )
         prefetch_bytes = max(
@@ -327,14 +328,14 @@ class EqualizerPlayer:
             if not wav_has_data:
                 break
 
-        bytes_per_cycle = RING_BUFFER_INPUT_FRAMES_PER_CYCLE * BYTES_PER_SAMPLE
+        bytes_per_cycle = SINGLE_THREAD_INPUT_FRAMES_PER_CYCLE * BYTES_PER_SAMPLE
         while self.ring_buffer.available() > 0 and not self.stopped:
             sample_data, finished = self.ring_buffer.read_sample()
             stream.write(sample_data)
 
             if wav_has_data and self.ring_buffer.free_space() >= bytes_per_cycle:
                 wav_has_data = write_next_frames_to_buffer(
-                    RING_BUFFER_INPUT_FRAMES_PER_CYCLE
+                    SINGLE_THREAD_INPUT_FRAMES_PER_CYCLE
                 )
 
             if finished:
