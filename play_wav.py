@@ -15,9 +15,10 @@ from filters.sinc.sinc_filter_bank import (
 )
 
 
-DEFAULT_BLOCK_SIZE = 128
+DEFAULT_BLOCK_SIZE = 64
 DEFAULT_RING_BUFFER_SIZE_BYTES = 32
-RING_BUFFER_INPUT_FRAMES_PER_CYCLE = 4
+RING_BUFFER_INPUT_FRAMES_PER_CYCLE = 8
+RING_BUFFER_OUTPUT_FRAMES_PER_CYCLE = 1
 SAMPLE_READ_TIMEOUT_SECONDS = 0.01
 BUFFER_MODE_DUAL_THREAD = "dual_thread"
 BUFFER_MODE_SINGLE_THREAD = "single_thread"
@@ -201,10 +202,6 @@ class EqualizerPlayer:
         self.build_filters(sample_rate)
 
         self.ring_buffer = RingBufferDualThread(self.ring_buffer_size_bytes)
-        output_frames_per_buffer = max(
-            1,
-            self.ring_buffer_size_bytes // (OUTPUT_CHANNELS * BYTES_PER_SAMPLE),
-        )
 
         producer = Thread(
             target=self.write_filtered_audio_to_buffer_dual_thread,
@@ -240,7 +237,7 @@ class EqualizerPlayer:
             channels=OUTPUT_CHANNELS,
             rate=sample_rate,
             output=True,
-            frames_per_buffer=output_frames_per_buffer,
+            frames_per_buffer=RING_BUFFER_OUTPUT_FRAMES_PER_CYCLE,
             stream_callback=play_from_ring_buffer,
             start=False,
         )
@@ -271,7 +268,7 @@ class EqualizerPlayer:
             channels=OUTPUT_CHANNELS,
             rate=sample_rate,
             output=True,
-            frames_per_buffer=RING_BUFFER_INPUT_FRAMES_PER_CYCLE,
+            frames_per_buffer=RING_BUFFER_OUTPUT_FRAMES_PER_CYCLE,
         )
 
         def write_next_frames_to_buffer(frames_to_read):
@@ -302,8 +299,8 @@ class EqualizerPlayer:
 
         bytes_per_cycle = RING_BUFFER_INPUT_FRAMES_PER_CYCLE * BYTES_PER_SAMPLE
         while self.ring_buffer.available() > 0 and not self.stopped:
-            data, finished = self.ring_buffer.read(bytes_per_cycle)
-            stream.write(data)
+            sample_data, finished = self.ring_buffer.read_sample()
+            stream.write(sample_data)
 
             if wav_has_data and self.ring_buffer.free_space() >= bytes_per_cycle:
                 wav_has_data = write_next_frames_to_buffer(
