@@ -6,12 +6,13 @@ from threading import Thread
 import pyaudio
 
 from buffers.dual_thread_ring_buffer import RingBufferDualThread
+from buffers.shifting_buffer import ShiftingBuffer
+from buffers.single_thread_ring_buffer import SingleThreadRingBuffer
 from filters.chebyshev.chebyshev_filter_bank import ChebyshevFilterBank
 from filters.sinc.sinc_filter_bank import (
     DEFAULT_TAP_COUNT,
     HammingSincFilterBank,
 )
-from buffers.single_thread_ring_buffer import SingleThreadRingBuffer
 
 
 DEFAULT_BLOCK_SIZE = 128
@@ -19,6 +20,7 @@ DEFAULT_RING_BUFFER_SIZE_BYTES = 32
 SAMPLE_READ_TIMEOUT_SECONDS = 0.01
 BUFFER_MODE_DUAL_THREAD = "dual_thread"
 BUFFER_MODE_SINGLE_THREAD = "single_thread"
+BUFFER_MODE_SHIFTING = "shifting"
 FILTER_TYPE_SINC = "sinc"
 FILTER_TYPE_CHEBYSHEV = "chebyshev"
 OUTPUT_CHANNELS = 1
@@ -158,7 +160,7 @@ class EqualizerPlayer:
             self.ring_buffer.close()
 
     def play(self):
-        if self.buffer_mode == BUFFER_MODE_SINGLE_THREAD:
+        if self.buffer_mode in (BUFFER_MODE_SINGLE_THREAD, BUFFER_MODE_SHIFTING):
             self.play_single_thread()
         else:
             self.play_dual_thread()
@@ -252,7 +254,10 @@ class EqualizerPlayer:
         self.build_filters(sample_rate)
 
         bytes_per_block = self.block_size * OUTPUT_CHANNELS * BYTES_PER_SAMPLE
-        self.ring_buffer = SingleThreadRingBuffer(self.ring_buffer_size_bytes)
+        if self.buffer_mode == BUFFER_MODE_SHIFTING:
+            self.ring_buffer = ShiftingBuffer(self.ring_buffer_size_bytes)
+        else:
+            self.ring_buffer = SingleThreadRingBuffer(self.ring_buffer_size_bytes)
 
         audio = pyaudio.PyAudio()
         stream = audio.open(
@@ -336,6 +341,24 @@ def play_wav_with_filter_single_thread(
     player = EqualizerPlayer(
         file_path,
         BUFFER_MODE_SINGLE_THREAD,
+        filter_type,
+        taps,
+        ring_buffer_size_bytes,
+        band_gains_db,
+    )
+    player.play()
+
+
+def play_wav_with_filter_shifting_buffer(
+    file_path,
+    taps=DEFAULT_TAP_COUNT,
+    band_gains_db=None,
+    ring_buffer_size_bytes=DEFAULT_RING_BUFFER_SIZE_BYTES,
+    filter_type=FILTER_TYPE_SINC,
+):
+    player = EqualizerPlayer(
+        file_path,
+        BUFFER_MODE_SHIFTING,
         filter_type,
         taps,
         ring_buffer_size_bytes,

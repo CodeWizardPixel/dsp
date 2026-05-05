@@ -23,6 +23,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from play_wav import (
     BUFFER_MODE_DUAL_THREAD,
+    BUFFER_MODE_SHIFTING,
     BUFFER_MODE_SINGLE_THREAD,
     DEFAULT_RING_BUFFER_SIZE_BYTES,
     EqualizerPlayer,
@@ -123,6 +124,7 @@ class MainWindow(QMainWindow):
         self.buffer_mode = QComboBox()
         self.buffer_mode.addItem("Двухпоточный", BUFFER_MODE_DUAL_THREAD)
         self.buffer_mode.addItem("Однопоточный", BUFFER_MODE_SINGLE_THREAD)
+        self.buffer_mode.addItem("Смещающий", BUFFER_MODE_SHIFTING)
 
         self.filter_type = QComboBox()
         self.filter_type.addItem("Окно Хемминга FIR", FILTER_TYPE_SINC)
@@ -137,7 +139,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.buffer_mode, 0, 1)
         layout.addWidget(QLabel("Тип фильтра"), 0, 2)
         layout.addWidget(self.filter_type, 0, 3)
-        layout.addWidget(QLabel("Размер кольца, байт"), 1, 0)
+        layout.addWidget(QLabel("Размер буфера, байт"), 1, 0)
         layout.addWidget(self.ring_buffer_size_bytes, 1, 1)
 
         return group
@@ -210,7 +212,15 @@ class MainWindow(QMainWindow):
     def current_ring_buffer_size_bytes(self):
         value = self.ring_buffer_size_bytes.value()
 
-        if value % 2 != 0:
+        if self.buffer_mode.currentData() == BUFFER_MODE_SHIFTING:
+            remainder = value % 4
+            if remainder != 0:
+                value = min(
+                    value + (4 - remainder),
+                    self.ring_buffer_size_bytes.maximum(),
+                )
+                self.ring_buffer_size_bytes.setValue(value)
+        elif value % 2 != 0:
             value = min(value + 1, self.ring_buffer_size_bytes.maximum())
             self.ring_buffer_size_bytes.setValue(value)
 
