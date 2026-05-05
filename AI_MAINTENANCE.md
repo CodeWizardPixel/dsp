@@ -71,6 +71,7 @@ ui/
 - конвертацию PCM bytes <-> samples;
 - выбор типа буфера;
 - выбор типа фильтра;
+- включение аудиоэффектов;
 - запуск воспроизведения через PyAudio;
 - класс `EqualizerPlayer`.
 
@@ -93,6 +94,12 @@ FILTER_TYPE_CHEBYSHEV = "chebyshev"
 
 `RING_BUFFER_OUTPUT_FRAMES_PER_CYCLE = 1` означает, что кольцевые буферы отдают на воспроизведение по одному выходному сэмплу за раз. Смещающий буфер работает отдельно и отдает на `stream.write(...)` сразу вторую половину буфера.
 
+Общая цепочка обработки сэмплов перед записью в любой буфер:
+
+```text
+WAV bytes -> mono samples -> filter bank -> effects -> selected buffer -> PyAudio
+```
+
 Функция `build_filter_bank(...)` выбирает семейство фильтров.
 
 Для Sinc FIR возвращается список из 8 потоковых фильтров.
@@ -109,6 +116,63 @@ ChebyshevFilterBank
 if hasattr(filters, "process_samples"):
     return filters.process_samples(samples)
 ```
+
+После фильтрации вызывается `process_audio_samples(...)`. Там последовательно применяются включенные эффекты:
+
+```text
+filter bank -> reverb, если включен -> clipping, если включен
+```
+
+## Эффекты
+
+Эффекты находятся в `play_wav.py` и применяются после эквалайзера, но до записи в буфер.
+
+### Реверберация
+
+Класс:
+
+```python
+ReverbEffect
+```
+
+Это простая delay-line реверберация с обратной связью. Основные константы:
+
+```python
+DEFAULT_REVERB_DELAY_MS = 120
+DEFAULT_REVERB_DECAY = 0.35
+DEFAULT_REVERB_WET = 0.35
+```
+
+`ReverbEffect` хранит внутренний delay-buffer, поэтому эффект должен создаваться заново при старте воспроизведения и построении фильтров:
+
+```python
+self.reverb = ReverbEffect(sample_rate)
+```
+
+При изменении чекбокса в UI во время воспроизведения меняется только флаг `reverb_enabled`; состояние delay-buffer не сбрасывается.
+
+### Клиппинг
+
+Функция:
+
+```python
+clip_samples(...)
+```
+
+Это hard clipping:
+
+```text
+sample < -threshold -> -threshold
+sample > threshold -> threshold
+```
+
+Порог:
+
+```python
+DEFAULT_CLIPPING_THRESHOLD = 12000
+```
+
+После клиппинга финальная защита от выхода за диапазон int16 все равно остается в `clamp_int16(...)`, который вызывается при конвертации samples -> PCM bytes.
 
 ## Буферы
 
@@ -131,7 +195,7 @@ BUFFER_MODE_DUAL_THREAD
 Схема:
 
 ```text
-producer thread -> pending filtered bytes -> RingBufferDualThread -> PyAudio callback
+producer thread -> filter -> effects -> pending bytes -> RingBufferDualThread -> PyAudio callback
 ```
 
 Внутри используется `Condition`, потому что один поток пишет, другой читает.
@@ -171,7 +235,7 @@ BUFFER_MODE_SINGLE_THREAD
 Схема:
 
 ```text
-fill ring buffer -> read one sample -> wait for enough free space -> write next sample batch
+filter -> effects -> fill ring buffer -> read one sample -> wait for enough free space -> write next sample batch
 ```
 
 Блокировок нет, потому что всё происходит в одном потоке.
@@ -203,7 +267,7 @@ BUFFER_MODE_SHIFTING
 Схема:
 
 ```text
-WAV chunk sized like first half -> filter -> first half -> shift -> second half -> stream.write(second half)
+WAV chunk sized like first half -> filter -> effects -> first half -> shift -> second half -> stream.write(second half)
 ```
 
 Буфер разделен на две части:
@@ -317,9 +381,25 @@ ui/main_window.py
 - выбрать WAV-файл;
 - выбрать тип буфера;
 - выбрать тип фильтра;
+- включить реверберацию;
+- включить клиппинг;
 - изменить размер буфера в байтах;
 - изменить усиление каждой из 8 полос от `0 dB` до `-100 dB`;
 - старт/стоп воспроизведения.
+
+Эффекты находятся в группе `Эффекты`:
+
+```text
+[ ] Реверберация
+[ ] Клиппинг
+```
+
+Чекбоксы можно менять во время воспроизведения. UI передает изменения в текущий `PlayerWorker`, а тот вызывает:
+
+```python
+set_reverb_enabled(...)
+set_clipping_enabled(...)
+```
 
 Кнопка `Стоп` должна сбрасывать воспроизведение, но не закрывать приложение.
 

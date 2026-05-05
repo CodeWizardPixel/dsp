@@ -4,6 +4,7 @@ import sys
 from PyQt5.QtCore import QObject, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QGridLayout,
@@ -58,6 +59,8 @@ class PlayerWorker(QObject):
         filter_type,
         ring_buffer_size_bytes,
         band_gains_db,
+        reverb_enabled,
+        clipping_enabled,
     ):
         super().__init__()
         self.player = EqualizerPlayer(
@@ -66,6 +69,8 @@ class PlayerWorker(QObject):
             filter_type=filter_type,
             ring_buffer_size_bytes=ring_buffer_size_bytes,
             band_gains_db=band_gains_db,
+            reverb_enabled=reverb_enabled,
+            clipping_enabled=clipping_enabled,
         )
 
     def run(self):
@@ -81,6 +86,12 @@ class PlayerWorker(QObject):
 
     def set_band_gain(self, band_number, gain_db):
         self.player.set_band_gain(band_number, gain_db)
+
+    def set_reverb_enabled(self, enabled):
+        self.player.set_reverb_enabled(enabled)
+
+    def set_clipping_enabled(self, enabled):
+        self.player.set_clipping_enabled(enabled)
 
 
 class MainWindow(QMainWindow):
@@ -102,6 +113,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.build_file_group())
         layout.addWidget(self.build_buffer_group())
+        layout.addWidget(self.build_effect_group())
         layout.addWidget(self.build_band_group())
         layout.addLayout(self.build_buttons())
 
@@ -118,6 +130,22 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.file_label, 1)
         layout.addWidget(browse_button)
+        return group
+
+    def build_effect_group(self):
+        group = QGroupBox("Эффекты")
+        layout = QHBoxLayout(group)
+
+        self.reverb_enabled = QCheckBox("Реверберация")
+        self.clipping_enabled = QCheckBox("Клиппинг")
+
+        self.reverb_enabled.toggled.connect(self.change_reverb_enabled)
+        self.clipping_enabled.toggled.connect(self.change_clipping_enabled)
+
+        layout.addWidget(self.reverb_enabled)
+        layout.addWidget(self.clipping_enabled)
+        layout.addStretch(1)
+
         return group
 
     def build_buffer_group(self):
@@ -212,6 +240,12 @@ class MainWindow(QMainWindow):
             for band_number, slider in self.gain_sliders.items()
         }
 
+    def current_reverb_enabled(self):
+        return self.reverb_enabled.isChecked()
+
+    def current_clipping_enabled(self):
+        return self.clipping_enabled.isChecked()
+
     def current_ring_buffer_size_bytes(self):
         value = self.ring_buffer_size_bytes.value()
         buffer_mode = self.buffer_mode.currentData()
@@ -255,6 +289,14 @@ class MainWindow(QMainWindow):
         if self.worker is not None:
             self.worker.set_band_gain(band_number, gain_db)
 
+    def change_reverb_enabled(self, enabled):
+        if self.worker is not None:
+            self.worker.set_reverb_enabled(enabled)
+
+    def change_clipping_enabled(self, enabled):
+        if self.worker is not None:
+            self.worker.set_clipping_enabled(enabled)
+
     def start_playback(self):
         if not self.file_path:
             return
@@ -270,6 +312,8 @@ class MainWindow(QMainWindow):
             filter_type=self.filter_type.currentData(),
             ring_buffer_size_bytes=self.current_ring_buffer_size_bytes(),
             band_gains_db=self.current_band_gains(),
+            reverb_enabled=self.current_reverb_enabled(),
+            clipping_enabled=self.current_clipping_enabled(),
         )
         self.worker.moveToThread(self.thread)
 

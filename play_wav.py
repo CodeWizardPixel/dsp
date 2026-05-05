@@ -21,6 +21,10 @@ DUAL_THREAD_INPUT_FRAMES_PER_CYCLE = 2
 SINGLE_THREAD_INPUT_FRAMES_PER_CYCLE = 8
 RING_BUFFER_OUTPUT_FRAMES_PER_CYCLE = 1
 SAMPLE_READ_TIMEOUT_SECONDS = 0.01
+DEFAULT_REVERB_DELAY_MS = 120
+DEFAULT_REVERB_DECAY = 0.35
+DEFAULT_REVERB_WET = 0.35
+DEFAULT_CLIPPING_THRESHOLD = 12000
 BUFFER_MODE_DUAL_THREAD = "dual_thread"
 BUFFER_MODE_SINGLE_THREAD = "single_thread"
 BUFFER_MODE_SHIFTING = "shifting"
@@ -123,6 +127,38 @@ def process_samples_with_filter_bank(samples, filters):
     return mix_filter_outputs(filter_outputs)
 
 
+def clip_samples(samples, threshold=DEFAULT_CLIPPING_THRESHOLD):
+    return [max(-threshold, min(threshold, sample)) for sample in samples]
+
+
+class ReverbEffect:
+    def __init__(
+        self,
+        sample_rate,
+        delay_ms=DEFAULT_REVERB_DELAY_MS,
+        decay=DEFAULT_REVERB_DECAY,
+        wet=DEFAULT_REVERB_WET,
+    ):
+        delay_samples = max(1, int(sample_rate * delay_ms / 1000))
+        self.buffer = [0.0] * delay_samples
+        self.index = 0
+        self.decay = decay
+        self.wet = wet
+        self.dry = 1 - wet
+
+    def process_samples(self, samples):
+        processed_samples = []
+
+        for sample in samples:
+            delayed_sample = self.buffer[self.index]
+            output_sample = sample * self.dry + delayed_sample * self.wet
+            self.buffer[self.index] = sample + delayed_sample * self.decay
+            self.index = (self.index + 1) % len(self.buffer)
+            processed_samples.append(output_sample)
+
+        return processed_samples
+
+
 class EqualizerPlayer:
     def __init__(
         self,
@@ -132,6 +168,8 @@ class EqualizerPlayer:
         taps=DEFAULT_TAP_COUNT,
         ring_buffer_size_bytes=DEFAULT_RING_BUFFER_SIZE_BYTES,
         band_gains_db=None,
+        reverb_enabled=False,
+        clipping_enabled=False,
     ):
         self.file_path = file_path
         self.buffer_mode = buffer_mode
@@ -141,8 +179,11 @@ class EqualizerPlayer:
         self.ring_buffer_size_bytes = ring_buffer_size_bytes
         self.band_gains_db = DEFAULT_BAND_GAINS_DB.copy()
         self.filters = []
+        self.reverb = None
         self.ring_buffer = None
         self.stopped = False
+        self.reverb_enabled = reverb_enabled
+        self.clipping_enabled = clipping_enabled
 
         if band_gains_db is not None:
             self.band_gains_db.update(band_gains_db)
@@ -155,6 +196,12 @@ class EqualizerPlayer:
                 self.filters.set_band_gain(band_number, gain_db)
             else:
                 self.filters[band_number - 1].set_gain_db(gain_db)
+
+    def set_reverb_enabled(self, enabled):
+        self.reverb_enabled = enabled
+
+    def set_clipping_enabled(self, enabled):
+        self.clipping_enabled = enabled
 
     def stop(self):
         self.stopped = True
@@ -177,6 +224,18 @@ class EqualizerPlayer:
             self.band_gains_db,
             self.filter_type,
         )
+        self.reverb = ReverbEffect(sample_rate)
+
+    def process_audio_samples(self, samples):
+        processed_samples = process_samples_with_filter_bank(samples, self.filters)
+
+        if self.reverb_enabled:
+            processed_samples = self.reverb.process_samples(processed_samples)
+
+        if self.clipping_enabled:
+            processed_samples = clip_samples(processed_samples)
+
+        return processed_samples
 
     def write_filtered_audio_to_buffer_dual_thread(self, wav_file):
         channels = wav_file.getnchannels()
@@ -197,7 +256,7 @@ class EqualizerPlayer:
                 return b""
 
             samples = bytes_to_samples(frames, channels)
-            filtered_samples = process_samples_with_filter_bank(samples, self.filters)
+            filtered_samples = self.process_audio_samples(samples)
             return samples_to_bytes(filtered_samples)
 
         while not self.stopped:
@@ -308,7 +367,7 @@ class EqualizerPlayer:
                 return False
 
             samples = bytes_to_samples(frames, channels)
-            filtered_samples = process_samples_with_filter_bank(samples, self.filters)
+            filtered_samples = self.process_audio_samples(samples)
 
             for sample in filtered_samples:
                 if self.ring_buffer.free_space() < BYTES_PER_SAMPLE:
@@ -385,7 +444,7 @@ class EqualizerPlayer:
         frames = wav_file.readframes(input_frames_per_chunk)
         while frames and not self.stopped:
             samples = bytes_to_samples(frames, channels)
-            filtered_samples = process_samples_with_filter_bank(samples, self.filters)
+            filtered_samples = self.process_audio_samples(samples)
 
             for sample in filtered_samples:
                 self.ring_buffer.write(sample_to_bytes(sample))
@@ -424,6 +483,8 @@ def play_wav_with_filter_dual_thread(
     band_gains_db=None,
     ring_buffer_size_bytes=DEFAULT_RING_BUFFER_SIZE_BYTES,
     filter_type=FILTER_TYPE_SINC,
+    reverb_enabled=False,
+    clipping_enabled=False,
 ):
     player = EqualizerPlayer(
         file_path,
@@ -432,6 +493,8 @@ def play_wav_with_filter_dual_thread(
         taps,
         ring_buffer_size_bytes,
         band_gains_db,
+        reverb_enabled,
+        clipping_enabled,
     )
     player.play()
 
@@ -442,6 +505,8 @@ def play_wav_with_filter_single_thread(
     band_gains_db=None,
     ring_buffer_size_bytes=DEFAULT_RING_BUFFER_SIZE_BYTES,
     filter_type=FILTER_TYPE_SINC,
+    reverb_enabled=False,
+    clipping_enabled=False,
 ):
     player = EqualizerPlayer(
         file_path,
@@ -450,6 +515,8 @@ def play_wav_with_filter_single_thread(
         taps,
         ring_buffer_size_bytes,
         band_gains_db,
+        reverb_enabled,
+        clipping_enabled,
     )
     player.play()
 
@@ -460,6 +527,8 @@ def play_wav_with_filter_shifting_buffer(
     band_gains_db=None,
     ring_buffer_size_bytes=DEFAULT_RING_BUFFER_SIZE_BYTES,
     filter_type=FILTER_TYPE_SINC,
+    reverb_enabled=False,
+    clipping_enabled=False,
 ):
     player = EqualizerPlayer(
         file_path,
@@ -468,6 +537,8 @@ def play_wav_with_filter_shifting_buffer(
         taps,
         ring_buffer_size_bytes,
         band_gains_db,
+        reverb_enabled,
+        clipping_enabled,
     )
     player.play()
 
